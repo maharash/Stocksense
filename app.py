@@ -3,101 +3,103 @@ import yfinance as yf
 import mplfinance as mpf
 import pandas as pd
 from PIL import Image
-from datetime import datetime, timedelta
 from io import BytesIO
 from ultralytics import YOLO
 
-# Replace with the path to your YOLO model weights
+# Replace with your actual model path and API key
 model_path = 'weights/custom_yolov8.pt'
+API_KEY = '6ZH5YJK5IGEMA8PN'  # (Currently unused in code)
+logo_url = "images/Logo1.png"  # Local logo path
 
-# Logo URL
-logo_url = "images/Logo1.png"
-
-# Streamlit Page Configuration
+# Streamlit page config
 st.set_page_config(
     page_title="StockSense",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="expanded"
 )
 
-# Function to download and plot stock data as a candlestick chart
-def generate_chart(ticker, interval="1d", chunk_size=180, figsize=(18, 6.5), dpi=100):
-    if interval == "1h":
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=730)
-        period = None
-    else:
-        start_date = None
-        end_date = None
-        period = "max"
-    
-    data = yf.download(ticker, interval=interval, start=start_date, end=end_date, period=period)
-    
-    if not data.empty:
-        data.index = pd.to_datetime(data.index)
-        data = data.iloc[-chunk_size:]
+def generate_chart(ticker, interval='1d'):
+    try:
+        data = yf.download(ticker, period='1y', interval=interval)
 
-        fig, ax = mpf.plot(data, type="candle", style="yahoo",
-                           title=f"{ticker} Latest {chunk_size} Candles",
-                           axisoff=True,
-                           ylabel="",
-                           ylabel_lower="",
-                           volume=False,
-                           figsize=figsize,
-                           returnfig=True)
+        if data.empty:
+            st.error("No data found for the selected ticker.")
+            return None
 
-        buffer = BytesIO()
-        fig.savefig(buffer, format='png', dpi=dpi)
-        buffer.seek(0)
-        return buffer
-    else:
-        st.error("No data found for the specified ticker and interval.")
+        # Flatten multi-level columns if any
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+
+        numeric_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        for col in numeric_columns:
+            if col not in data.columns:
+                st.error(f"Column '{col}' missing in data.")
+                return None
+            # Convert to numeric safely
+            data[col] = pd.to_numeric(data[col], errors='coerce')
+
+        # Drop rows with NaNs
+        data.dropna(subset=numeric_columns, inplace=True)
+        if data.empty:
+            st.error("No valid data after cleaning.")
+            return None
+
+        buf = BytesIO()
+        mpf.plot(
+            data,
+            type='candle',
+            style='charles',
+            title=f"{ticker.upper()} Stock Chart",
+            volume=True,
+            savefig=dict(fname=buf, format='png')
+        )
+        buf.seek(0)
+        return buf
+
+    except Exception as e:
+        st.error(f"Error generating chart: {e}")
         return None
 
-# Sidebar UI elements
+# Sidebar UI
 with st.sidebar:
-    st.image(logo_url, use_column_width="auto")
+    st.image(logo_url, use_column_width=True)
     st.header("Configurations")
-    
+
     st.subheader("Generate Chart")
-    ticker = st.text_input("Enter Ticker Symbol (e.g., AAPL):")
+    ticker = st.text_input("Enter Ticker Symbol (e.g. AAPL):").strip().upper()
     interval = st.selectbox("Select Interval", ["1d", "1h", "1wk"])
-    chunk_size = 180
+    chunk_size = 180  # fixed, not currently used in generate_chart
+
     if st.button("Generate Chart"):
         if ticker:
-            chart_buffer = generate_chart(ticker, interval=interval, chunk_size=chunk_size)
-            if chart_buffer:
-                st.success(f"Chart generated successfully.")
+            chart_buf = generate_chart(ticker, interval=interval)
+            if chart_buf:
+                st.success("Chart generated successfully.")
                 st.download_button(
                     label=f"Download {ticker} Chart",
-                    data=chart_buffer,
+                    data=chart_buf,
                     file_name=f"{ticker}_latest_{chunk_size}_candles.png",
                     mime="image/png"
                 )
-                st.image(chart_buffer, caption=f"{ticker} Chart", use_column_width=True)
+                st.image(chart_buf, caption=f"{ticker} Chart", use_column_width=True)
         else:
             st.error("Please enter a valid ticker symbol.")
 
     st.subheader("Upload Image for Detection")
-    source_img = st.file_uploader("Upload an image...", type=("jpg", "jpeg", "png", 'bmp', 'webp'))
-    confidence = float(st.slider("Select Model Confidence", 25, 100, 30)) / 100
+    source_img = st.file_uploader("Upload an image...", type=["jpg", "jpeg", "png", "bmp", "webp"])
+    confidence = st.slider("Select Model Confidence (%)", 25, 100, 30) / 100.0
 
-# Main Page Title and Instructions
+# Main page
 st.title("StockSense")
-st.caption('📈 To use the app, choose one of the following options:')
-st.markdown('''
-**Option 1: Upload Your Own Image**
-1. **Upload Image:** Use the sidebar to upload a candlestick chart image from your local PC.
-2. **Detect Objects:** Click the :blue[Detect Objects] button to analyze the uploaded chart.
+st.caption('📈 Use the sidebar to generate charts or upload images for object detection.')
 
-**Option 2: Generate and Analyze Chart**
-1. **Generate Chart:** Provide the ticker symbol and interval in the sidebar to create and download a chart (latest 180 candles).
-2. **Upload Generated Chart:** Use the sidebar to upload the generated chart image.
-3. **Detect Objects:** Click the :blue[Detect Objects] button to analyze the generated chart.
+st.markdown('''
+**Options:**
+- Generate a candlestick chart by entering a ticker and selecting an interval.
+- Upload your own chart image to detect candlestick patterns.
 ''')
 
-# Columns for Displaying Images
 col1, col2 = st.columns(2)
 
 if source_img:
@@ -105,79 +107,73 @@ if source_img:
         uploaded_image = Image.open(source_img)
         st.image(uploaded_image, caption="Uploaded Image", use_column_width=True)
 
-# Load YOLO Model for Object Detection
+# Load YOLO model once
+model = None
 try:
     model = YOLO(model_path)
-except Exception as ex:
-    st.error(f"Unable to load model. Check the specified path: {model_path}")
-    st.error(ex)
+except Exception as e:
+    st.error(f"Failed to load YOLO model from {model_path}: {e}")
 
-# Function to identify and label patterns
-# Function to identify and label patterns
 def identify_patterns(boxes):
-    pattern_names = []
-
-    # Loop through each box and apply pattern detection logic
+    patterns = []
     for box in boxes:
         x, y, w, h = box.xywh[0]
-
-        # Example pattern detection based on width and height conditions
+        # Simple heuristics based on width and height of bounding boxes
         if w > 100 and h > 100:
-            pattern_names.append("Bullish Engulfing")
+            patterns.append("Bullish Engulfing")
         elif w < 50 and h > 100:
-            pattern_names.append("Bearish Engulfing")
+            patterns.append("Bearish Engulfing")
         elif w > 50 and h < 50:
-            pattern_names.append("Hammer")
+            patterns.append("Hammer")
         elif w < 30 and h < 30:
-            pattern_names.append("Doji")
+            patterns.append("Doji")
         elif w > 70 and h < 30:
-            pattern_names.append("Shooting Star")
-        elif w < 50 and h > 50 and w == h:
-            pattern_names.append("Spinning Top")
+            patterns.append("Shooting Star")
+        elif w < 50 and h > 50 and abs(w - h) < 5:
+            patterns.append("Spinning Top")
         elif w > 60 and h > 40:
-            pattern_names.append("Morning Star")
+            patterns.append("Morning Star")
         elif w < 40 and h > 60:
-            pattern_names.append("Evening Star")
-        elif w == h and w > 100:
-            pattern_names.append("Marubozu")
+            patterns.append("Evening Star")
+        elif abs(w - h) < 5 and w > 100:
+            patterns.append("Marubozu")
         elif w > 50 and h > 150:
-            pattern_names.append("Long-Legged Doji")
+            patterns.append("Long-Legged Doji")
         elif w < 40 and h < 100:
-            pattern_names.append("Harami")
+            patterns.append("Harami")
         elif w > 100 and h < 40:
-            pattern_names.append("Inverted Hammer")
+            patterns.append("Inverted Hammer")
         elif w > 50 and h < 100:
-            pattern_names.append("Belt Hold")
+            patterns.append("Belt Hold")
         elif w > 30 and h > 50:
-            pattern_names.append("Tweezer Top")
+            patterns.append("Tweezer Top")
         elif w < 20 and h > 50:
-            pattern_names.append("Tweezer Bottom")
+            patterns.append("Tweezer Bottom")
         else:
-            pattern_names.append("Unidentified Pattern")
+            patterns.append("Unidentified Pattern")
+    return patterns
 
-    return pattern_names
-
-
-# Detect Objects and Identify Patterns
-if st.sidebar.button('Detect Objects'):
-    if source_img:
+if st.sidebar.button("Detect Objects"):
+    if not model:
+        st.error("YOLO model not loaded, cannot perform detection.")
+    elif not source_img:
+        st.error("Please upload an image first.")
+    else:
         source_img.seek(0)
-        uploaded_image = Image.open(source_img)
-        res = model.predict(uploaded_image, conf=confidence)
-        boxes = res[0].boxes
-        res_plotted = res[0].plot()[:, :, ::-1]
-        
-        # Display detected image
+        image = Image.open(source_img)
+        results = model.predict(image, conf=confidence)
+        boxes = results[0].boxes
+
+        detected_img = results[0].plot()[:, :, ::-1]  # Convert BGR to RGB
+
         with col2:
-            st.image(res_plotted, caption='Detected Image', use_column_width=True)
-        
-        # Display pattern names with bounding box info
+            st.image(detected_img, caption="Detected Patterns", use_column_width=True)
+
         try:
             pattern_names = identify_patterns(boxes)
             with st.expander("Detection Results"):
                 for i, box in enumerate(boxes):
-                    st.write(f"Pattern: {pattern_names[i]}, Box Coordinates: {box.xywh}")
-        except Exception as ex:
-            st.write("Error displaying detection results.")
-    else:
-        st.error("Please upload an image first.")
+                    coords = box.xywh[0].tolist()
+                    st.write(f"Pattern: {pattern_names[i]}, Box (x,y,w,h): {coords}")
+        except Exception as e:
+            st.error(f"Error showing detection results: {e}")
